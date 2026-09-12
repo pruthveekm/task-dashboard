@@ -30,7 +30,10 @@ import {
   Info,
   Volume2,
   VolumeX,
-  Radio
+  Radio,
+  Database,
+  CloudCheck,
+  CloudOff
 } from "lucide-react";
 
 // Types definition
@@ -139,6 +142,10 @@ export default function TaskDashboard() {
   const [darkMode, setDarkMode] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
 
+  // Cloud DB Connection Status State
+  const [dbConnected, setDbConnected] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
+
   // Admin Authentication State
   const [isAdmin, setIsAdmin] = useState(false);
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
@@ -178,8 +185,14 @@ export default function TaskDashboard() {
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [dragOverStatus, setDragOverStatus] = useState<Status | null>(null);
 
-  // Ref to track last remote sync timestamp to avoid infinite feedback loops
-  const lastSyncHashRef = useRef<string>("");
+  // Cloud Database URL Configuration
+  const cloudDbUrl =
+    (process.env.NEXT_PUBLIC_FIREBASE_DB_URL ||
+    "https://task-dashboard-database-default-rtdb.firebaseio.com").trim().replace(/\/$/, "");
+
+  // Last local timestamp hash ref to prevent self-looping on Cloud DB fetch
+  const lastLocalTimestampRef = useRef<number>(0);
+  const lastStateHashRef = useRef<string>("");
 
   // Sound Synthesizer using Web Audio API
   const playAudioChime = useCallback(() => {
@@ -190,7 +203,6 @@ export default function TaskDashboard() {
       const ctx = new AudioCtx();
       const now = ctx.currentTime;
 
-      // Note 1: E5 (659.25 Hz)
       const osc1 = ctx.createOscillator();
       const gain1 = ctx.createGain();
       osc1.type = "sine";
@@ -202,7 +214,6 @@ export default function TaskDashboard() {
       osc1.start(now);
       osc1.stop(now + 0.28);
 
-      // Note 2: B5 (987.77 Hz) - Pleasant tactile chime chord
       const osc2 = ctx.createOscillator();
       const gain2 = ctx.createGain();
       osc2.type = "sine";
@@ -265,147 +276,99 @@ export default function TaskDashboard() {
   const expectedAdminUser = (process.env.NEXT_PUBLIC_ADMIN_USERNAME || "Pruthveek").trim().toLowerCase();
   const expectedAdminPass = process.env.NEXT_PUBLIC_ADMIN_PASSWORD || "Pruthveek@123";
 
-  // Realtime BroadcastChannel & LocalStorage Sync Across Tabs / Windows
-  useEffect(() => {
-    let channel: BroadcastChannel | null = null;
-    try {
-      if (typeof window !== "undefined" && "BroadcastChannel" in window) {
-        channel = new BroadcastChannel("mono_task_realtime_sync");
-        channel.onmessage = (event) => {
-          if (event.data && event.data.type === "SYNC_TASKS") {
-            const incomingTasks: Task[] = event.data.tasks;
-            const hash = JSON.stringify(incomingTasks);
-            if (hash !== lastSyncHashRef.current) {
-              lastSyncHashRef.current = hash;
-              setTasks(incomingTasks);
-              triggerToast("🔔 Live Update: Tasks synchronized!", "info", true);
-            }
-          } else if (event.data && event.data.type === "SYNC_MEMBERS") {
-            const incomingMembers: TeamMember[] = event.data.members;
-            setMembers(incomingMembers);
-          }
-        };
-      }
-    } catch (e) {
-      console.warn("BroadcastChannel not supported in environment", e);
-    }
+  // --- CLOUD DATABASE REALTIME PERSISTENCE & SYNC ---
 
-    return () => {
-      if (channel) channel.close();
-    };
-  }, [triggerToast]);
-
-  // Firebase Realtime DB Endpoint for cross-device live sync
-  const firebaseDbUrl = (process.env.NEXT_PUBLIC_FIREBASE_DB_URL || "").trim().replace(/\/$/, "");
-
-  // Realtime BroadcastChannel & LocalStorage Sync Across Tabs / Windows
-  useEffect(() => {
-    let channel: BroadcastChannel | null = null;
-    try {
-      if (typeof window !== "undefined" && "BroadcastChannel" in window) {
-        channel = new BroadcastChannel("mono_task_realtime_sync");
-        channel.onmessage = (event) => {
-          if (event.data && event.data.type === "SYNC_TASKS") {
-            const incomingTasks: Task[] = event.data.tasks;
-            const hash = JSON.stringify(incomingTasks);
-            if (hash !== lastSyncHashRef.current) {
-              lastSyncHashRef.current = hash;
-              setTasks(incomingTasks);
-              triggerToast("🔔 Live Update: Tasks synchronized!", "info", true);
-            }
-          } else if (event.data && event.data.type === "SYNC_MEMBERS") {
-            const incomingMembers: TeamMember[] = event.data.members;
-            setMembers(incomingMembers);
-          }
-        };
-      }
-    } catch (e) {
-      console.warn("BroadcastChannel not supported in environment", e);
-    }
-
-    return () => {
-      if (channel) channel.close();
-    };
-  }, [triggerToast]);
-
-  // Firebase Realtime DB Live Sync Stream (EventSource SSE) across all devices
-  useEffect(() => {
-    if (!firebaseDbUrl) return;
-    let eventSource: EventSource | null = null;
-
-    try {
-      eventSource = new EventSource(`${firebaseDbUrl}/sync.json`);
-      eventSource.onmessage = (event) => {
-        try {
-          const parsed = JSON.parse(event.data);
-          const syncObj = parsed && parsed.data ? parsed.data : parsed;
-          if (syncObj) {
-            if (Array.isArray(syncObj.tasks)) {
-              const hash = JSON.stringify(syncObj.tasks);
-              if (hash !== lastSyncHashRef.current) {
-                lastSyncHashRef.current = hash;
-                setTasks(syncObj.tasks);
-                triggerToast("🔔 Live Update: Remote changes synced!", "info", true);
-              }
-            }
-            if (Array.isArray(syncObj.members)) {
-              setMembers(syncObj.members);
-            }
-          }
-        } catch (e) {
-          console.warn("Firebase SSE parse error", e);
-        }
+  // Write State directly to Cloud Database & LocalStorage
+  const syncToCloudDB = useCallback(
+    async (newTasks: Task[], newMembers: TeamMember[]) => {
+      setIsSyncing(true);
+      const timestamp = Date.now();
+      lastLocalTimestampRef.current = timestamp;
+      const statePayload = {
+        tasks: newTasks,
+        members: newMembers,
+        updatedAt: timestamp
       };
-    } catch (e) {
-      console.warn("Firebase EventSource init error", e);
-    }
+      lastStateHashRef.current = JSON.stringify(statePayload);
 
-    return () => {
-      if (eventSource) eventSource.close();
-    };
-  }, [firebaseDbUrl, triggerToast]);
-
-  // Broadcast state changes to BroadcastChannel & Firebase REST DB
-  const broadcastSync = useCallback(
-    (newTasks: Task[], newMembers?: TeamMember[]) => {
-      const hash = JSON.stringify(newTasks);
-      lastSyncHashRef.current = hash;
-
-      // Local BroadcastChannel sync across browser tabs
+      // Save to localStorage fallback
       try {
-        if (typeof window !== "undefined" && "BroadcastChannel" in window) {
-          const channel = new BroadcastChannel("mono_task_realtime_sync");
-          channel.postMessage({ type: "SYNC_TASKS", tasks: newTasks });
-          if (newMembers) {
-            channel.postMessage({ type: "SYNC_MEMBERS", members: newMembers });
-          }
-          channel.close();
+        localStorage.setItem("mono_tasks", JSON.stringify(newTasks));
+        localStorage.setItem("mono_members", JSON.stringify(newMembers));
+      } catch (e) {
+        console.error("LocalStorage save error", e);
+      }
+
+      // Push to Cloud Database (Firebase Realtime REST DB)
+      try {
+        const response = await fetch(`${cloudDbUrl}/state.json`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(statePayload)
+        });
+        if (response.ok) {
+          setDbConnected(true);
+        } else {
+          setDbConnected(false);
         }
       } catch (e) {
-        console.warn("BroadcastChannel post error", e);
-      }
-
-      // Firebase REST DB Push across all devices
-      if (firebaseDbUrl) {
-        try {
-          fetch(`${firebaseDbUrl}/sync.json`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              tasks: newTasks,
-              members: newMembers || members,
-              updatedAt: Date.now()
-            })
-          }).catch((err) => console.warn("Firebase sync error", err));
-        } catch (e) {
-          console.warn("Firebase fetch error", e);
-        }
+        console.warn("Cloud DB Connection Warning (offline fallback active)", e);
+        setDbConnected(false);
+      } finally {
+        setIsSyncing(false);
       }
     },
-    [firebaseDbUrl, members]
+    [cloudDbUrl]
   );
 
-  // Load from localStorage & Firebase on mount
+  // Fetch State from Cloud Database (Initial load + Polling)
+  const fetchFromCloudDB = useCallback(
+    async (isInitial = false) => {
+      try {
+        const response = await fetch(`${cloudDbUrl}/state.json`, { cache: "no-store" });
+        if (response.ok) {
+          const data = await response.json();
+          setDbConnected(true);
+
+          if (data && data.tasks && Array.isArray(data.tasks)) {
+            const remoteHash = JSON.stringify({ tasks: data.tasks, members: data.members, updatedAt: data.updatedAt });
+            const remoteTimestamp = data.updatedAt || 0;
+            
+            if (isInitial || (remoteHash !== lastStateHashRef.current && remoteTimestamp >= lastLocalTimestampRef.current)) {
+              lastStateHashRef.current = remoteHash;
+              lastLocalTimestampRef.current = remoteTimestamp || Date.now();
+              setTasks(data.tasks);
+              if (data.members && Array.isArray(data.members)) {
+                setMembers(data.members);
+              }
+              // Update local cache
+              try {
+                localStorage.setItem("mono_tasks", JSON.stringify(data.tasks));
+                if (data.members) localStorage.setItem("mono_members", JSON.stringify(data.members));
+              } catch (e) {}
+
+              if (!isInitial) {
+                triggerToast("☁️ Database: Live data synced!", "info", true);
+              }
+            }
+          } else if (isInitial) {
+            // Database is empty, populate initial default data into Cloud DB
+            syncToCloudDB(DEFAULT_TASKS, DEFAULT_MEMBERS);
+            setTasks(DEFAULT_TASKS);
+            setMembers(DEFAULT_MEMBERS);
+          }
+        } else {
+          setDbConnected(false);
+        }
+      } catch (e) {
+        console.warn("Cloud DB unreachable, utilizing local storage fallback", e);
+        setDbConnected(false);
+      }
+    },
+    [cloudDbUrl, syncToCloudDB, triggerToast]
+  );
+
+  // Initial Load from LocalStorage + Cloud DB
   useEffect(() => {
     try {
       const savedTasks = localStorage.getItem("mono_tasks");
@@ -415,12 +378,9 @@ export default function TaskDashboard() {
       const savedSound = localStorage.getItem("mono_sound_enabled");
 
       if (savedTasks) {
-        const parsed = JSON.parse(savedTasks);
-        setTasks(parsed);
-        lastSyncHashRef.current = JSON.stringify(parsed);
+        setTasks(JSON.parse(savedTasks));
       } else {
         setTasks(DEFAULT_TASKS);
-        lastSyncHashRef.current = JSON.stringify(DEFAULT_TASKS);
       }
 
       if (savedMembers) {
@@ -442,53 +402,27 @@ export default function TaskDashboard() {
       if (savedSound !== null) {
         setSoundEnabled(JSON.parse(savedSound));
       }
-
-      // Fetch latest state from Firebase if URL exists
-      if (firebaseDbUrl) {
-        fetch(`${firebaseDbUrl}/sync.json`)
-          .then((res) => res.json())
-          .then((remoteData) => {
-            if (remoteData) {
-              if (Array.isArray(remoteData.tasks)) {
-                setTasks(remoteData.tasks);
-                lastSyncHashRef.current = JSON.stringify(remoteData.tasks);
-              }
-              if (Array.isArray(remoteData.members)) {
-                setMembers(remoteData.members);
-              }
-            }
-          })
-          .catch((e) => console.warn("Initial Firebase fetch error", e));
-      }
     } catch (e) {
       console.error("Error reading localStorage", e);
       setTasks(DEFAULT_TASKS);
       setMembers(DEFAULT_MEMBERS);
     }
+    
     setIsLoaded(true);
-  }, [firebaseDbUrl]);
 
-  // Save to localStorage & Broadcast when state changes
+    fetchFromCloudDB(true);
+  }, [fetchFromCloudDB]);
+
+  // Real-time Cloud DB polling interval (every 3.5 seconds)
   useEffect(() => {
     if (!isLoaded) return;
-    try {
-      localStorage.setItem("mono_tasks", JSON.stringify(tasks));
-      broadcastSync(tasks);
-    } catch (e) {
-      console.error("Error saving tasks to localStorage", e);
-    }
-  }, [tasks, isLoaded, broadcastSync]);
+    const interval = setInterval(() => {
+      fetchFromCloudDB(false);
+    }, 3500);
+    return () => clearInterval(interval);
+  }, [isLoaded, fetchFromCloudDB]);
 
-  useEffect(() => {
-    if (!isLoaded) return;
-    try {
-      localStorage.setItem("mono_members", JSON.stringify(members));
-      broadcastSync(tasks, members);
-    } catch (e) {
-      console.error("Error saving members to localStorage", e);
-    }
-  }, [members, isLoaded, tasks, broadcastSync]);
-
+  // Sync to theme preference
   useEffect(() => {
     if (!isLoaded) return;
     try {
@@ -551,10 +485,11 @@ export default function TaskDashboard() {
       triggerToast("Admin authorization required to reset data", "error");
       return;
     }
-    if (confirm("Reset all tasks and team members to initial default state?")) {
+    if (confirm("Reset all tasks and team members in Cloud DB to initial default state?")) {
       setTasks(DEFAULT_TASKS);
       setMembers(DEFAULT_MEMBERS);
-      triggerToast("Dashboard reset to default state", "success");
+      syncToCloudDB(DEFAULT_TASKS, DEFAULT_MEMBERS);
+      triggerToast("Cloud Database reset to default state", "success");
     }
   };
 
@@ -595,23 +530,22 @@ export default function TaskDashboard() {
 
     const assignedMember = members.find((m) => m.id === taskAssignee);
 
+    let updatedTasks: Task[];
     if (editingTask) {
-      setTasks((prev) =>
-        prev.map((t) =>
-          t.id === editingTask.id
-            ? {
-                ...t,
-                title: taskTitle.trim(),
-                description: taskDesc.trim(),
-                dueDate: taskDueDate || getTodayStr(),
-                priority: taskPriority,
-                assigneeId: taskAssignee || (members[0]?.id || ""),
-                status: taskStatus
-              }
-            : t
-        )
+      updatedTasks = tasks.map((t) =>
+        t.id === editingTask.id
+          ? {
+              ...t,
+              title: taskTitle.trim(),
+              description: taskDesc.trim(),
+              dueDate: taskDueDate || getTodayStr(),
+              priority: taskPriority,
+              assigneeId: taskAssignee || (members[0]?.id || ""),
+              status: taskStatus
+            }
+          : t
       );
-      triggerToast(`🔔 Task "${taskTitle.trim()}" updated!`, "success", true);
+      triggerToast(`☁️ Task "${taskTitle.trim()}" updated in Cloud DB!`, "success", true);
     } else {
       const newTask: Task = {
         id: `task-${Date.now()}`,
@@ -623,14 +557,16 @@ export default function TaskDashboard() {
         status: taskStatus,
         createdAt: new Date().toISOString()
       };
-      setTasks((prev) => [newTask, ...prev]);
+      updatedTasks = [newTask, ...tasks];
       triggerToast(
-        `🔔 New Task Assigned to ${assignedMember?.name || 'Member'}: "${taskTitle.trim()}"`,
+        `☁️ Task Assigned to ${assignedMember?.name || 'Member'}: "${taskTitle.trim()}"`,
         "success",
         true
       );
     }
 
+    setTasks(updatedTasks);
+    syncToCloudDB(updatedTasks, members);
     setIsTaskModalOpen(false);
   };
 
@@ -641,8 +577,10 @@ export default function TaskDashboard() {
       return;
     }
     if (confirm(`Are you sure you want to delete "${title || 'this task'}"?`)) {
-      setTasks((prev) => prev.filter((t) => t.id !== id));
-      triggerToast("Task deleted", "info");
+      const updatedTasks = tasks.filter((t) => t.id !== id);
+      setTasks(updatedTasks);
+      syncToCloudDB(updatedTasks, members);
+      triggerToast("Task deleted from Cloud DB", "info");
     }
   };
 
@@ -652,10 +590,13 @@ export default function TaskDashboard() {
     if (!targetTask) return;
     if (targetTask.status === newStatus) return;
 
-    setTasks((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, status: newStatus } : t))
+    const updatedTasks = tasks.map((t) =>
+      t.id === id ? { ...t, status: newStatus } : t
     );
-    triggerToast(`🔔 Status Updated: "${targetTask.title}" → ${newStatus}`, "success", true);
+
+    setTasks(updatedTasks);
+    syncToCloudDB(updatedTasks, members);
+    triggerToast(`☁️ Status Updated: "${targetTask.title}" → ${newStatus}`, "success", true);
   };
 
   // Add Team Member (Admin only)
@@ -677,10 +618,13 @@ export default function TaskDashboard() {
       initials
     };
 
-    setMembers((prev) => [...prev, newMember]);
+    const updatedMembers = [...members, newMember];
+    setMembers(updatedMembers);
+    syncToCloudDB(tasks, updatedMembers);
+
     setMemberName("");
     setMemberRole("");
-    triggerToast(`Added team member "${newMember.name}"`, "success");
+    triggerToast(`Added team member "${newMember.name}" to Cloud DB`, "success");
   };
 
   // Delete Team Member (Admin only)
@@ -695,15 +639,19 @@ export default function TaskDashboard() {
     }
 
     const memberToRemove = members.find((m) => m.id === id);
-    const remaining = members.filter((m) => m.id !== id);
+    const remainingMembers = members.filter((m) => m.id !== id);
 
-    setMembers(remaining);
-    
-    if (remaining.length > 0) {
-      setTasks((prev) =>
-        prev.map((t) => (t.assigneeId === id ? { ...t, assigneeId: remaining[0].id } : t))
+    let updatedTasks = tasks;
+    if (remainingMembers.length > 0) {
+      updatedTasks = tasks.map((t) =>
+        t.assigneeId === id ? { ...t, assigneeId: remainingMembers[0].id } : t
       );
     }
+
+    setMembers(remainingMembers);
+    setTasks(updatedTasks);
+    syncToCloudDB(updatedTasks, remainingMembers);
+
     triggerToast(`Removed member "${memberToRemove?.name || 'Member'}"`, "info");
   };
 
@@ -822,8 +770,9 @@ export default function TaskDashboard() {
   if (!isLoaded) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-[var(--bg)] text-[var(--ink)]">
-        <div className="font-mono text-xl tracking-widest animate-pulse skeuo-panel p-6 rounded-2xl">
-          CONSOLE 08 // INITIALIZING...
+        <div className="font-mono text-xl tracking-widest animate-pulse skeuo-panel p-6 rounded-2xl flex items-center gap-3">
+          <Database className="w-6 h-6 animate-spin text-emerald-500" />
+          <span>CONNECTING TO CLOUD DATABASE...</span>
         </div>
       </div>
     );
@@ -832,7 +781,7 @@ export default function TaskDashboard() {
   return (
     <div className="min-h-screen bg-[var(--bg)] text-[var(--ink)] transition-colors duration-300 p-4 md:p-8 font-sans selection:bg-[var(--ink)] selection:text-[var(--bg)] relative">
       
-      {/* TOAST NOTIFICATION CONTAINER WITH AUDIO INDICATOR */}
+      {/* TOAST NOTIFICATION CONTAINER */}
       <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none">
         {toasts.map((t) => (
           <div
@@ -859,9 +808,9 @@ export default function TaskDashboard() {
         <header className="skeuo-panel rounded-3xl p-6 md:p-8 relative overflow-hidden transition-all">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
             
-            {/* Console Branding */}
+            {/* Console Branding & Cloud DB Status Badge */}
             <div>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <span className="w-3 h-3 rounded-full bg-[var(--ink)] animate-ping" />
                 <h1 className="text-lg md:text-xl font-bold tracking-[4px] uppercase text-[var(--ink)]">
                   CONSOLE 08
@@ -869,13 +818,22 @@ export default function TaskDashboard() {
                 <span className="text-xs px-2.5 py-0.5 rounded-full font-mono font-semibold skeuo-inset text-[var(--ink-soft)]">
                   {isAdmin ? "ADMIN MODE" : "GUEST MODE"}
                 </span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full font-mono text-emerald-600 dark:text-emerald-400 skeuo-inset flex items-center gap-1">
-                  <Radio className="w-3 h-3 animate-pulse" />
-                  REALTIME SYNC
-                </span>
+
+                {/* Cloud DB Connection Status Indicator */}
+                <div
+                  className={`text-[10px] px-3 py-1 rounded-full font-mono font-bold skeuo-inset flex items-center gap-1.5 ${
+                    dbConnected
+                      ? "text-emerald-600 dark:text-emerald-400"
+                      : "text-amber-600 dark:text-amber-400"
+                  }`}
+                  title={dbConnected ? "Cloud Database Active & Synced" : "Offline fallback active"}
+                >
+                  <Database className={`w-3.5 h-3.5 ${isSyncing ? "animate-spin text-emerald-500" : ""}`} />
+                  <span>{dbConnected ? (isSyncing ? "CLOUD SYNCING..." : "CLOUD DB ONLINE") : "OFFLINE FALLBACK"}</span>
+                </div>
               </div>
               <p className="mt-1 text-xs tracking-[2px] uppercase text-[var(--ink-soft)] font-medium">
-                MONOCHROME TASK & TEAM CONTROL UNIT
+                MONOCHROME TASK & TEAM CONTROL UNIT — CLOUD PERSISTENCE ACTIVE
               </p>
             </div>
 
@@ -963,7 +921,7 @@ export default function TaskDashboard() {
               {isAdmin && (
                 <button
                   onClick={handleResetData}
-                  title="Reset to default seed data"
+                  title="Reset Cloud DB to default seed data"
                   className="skeuo-btn p-2.5 rounded-2xl text-xs font-semibold flex items-center gap-2 cursor-pointer"
                 >
                   <RotateCcw className="w-4 h-4" />
@@ -1806,7 +1764,7 @@ export default function TaskDashboard() {
 
         {/* FOOTER */}
         <footer className="text-center pt-4 pb-8 border-t border-[var(--ink-soft)]/10 font-mono text-[10px] tracking-[2px] uppercase text-[var(--ink-soft)]">
-          SKEUOMORPHIC MONOCHROME DASHBOARD — REALTIME SYNC & AUDIO NOTIFICATIONS — RBAC AUTHENTICATION ENFORCED
+          SKEUOMORPHIC MONOCHROME DASHBOARD — CLOUD DATABASE PERSISTENCE — REALTIME SYNC ACTIVE
         </footer>
 
       </div>
