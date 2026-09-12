@@ -4,7 +4,6 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import {
   Plus,
   Search,
-  Filter,
   Users,
   LayoutGrid,
   List,
@@ -14,7 +13,6 @@ import {
   Trash2,
   Edit2,
   X,
-  UserPlus,
   RotateCcw,
   Calendar,
   Moon,
@@ -22,18 +20,13 @@ import {
   Kanban,
   Lock,
   Unlock,
-  ShieldAlert,
   KeyRound,
-  Eye,
   AlertTriangle,
   Check,
   Info,
   Volume2,
   VolumeX,
-  Radio,
-  Database,
-  CloudCheck,
-  CloudOff
+  Database
 } from "lucide-react";
 
 // Types definition
@@ -136,18 +129,58 @@ const DEFAULT_TASKS: Task[] = [
 const STATUSES: Status[] = ["To Do", "In Progress", "Review", "Done"];
 
 export default function TaskDashboard() {
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [members, setMembers] = useState<TeamMember[]>([]);
+  const [tasks, setTasks] = useState<Task[]>(() => {
+    if (typeof window === "undefined") return DEFAULT_TASKS;
+    try {
+      const savedTasks = localStorage.getItem("mono_tasks");
+      return savedTasks ? (JSON.parse(savedTasks) as Task[]) : DEFAULT_TASKS;
+    } catch {
+      return DEFAULT_TASKS;
+    }
+  });
+  const [members, setMembers] = useState<TeamMember[]>(() => {
+    if (typeof window === "undefined") return DEFAULT_MEMBERS;
+    try {
+      const savedMembers = localStorage.getItem("mono_members");
+      return savedMembers ? (JSON.parse(savedMembers) as TeamMember[]) : DEFAULT_MEMBERS;
+    } catch {
+      return DEFAULT_MEMBERS;
+    }
+  });
   const [isLoaded, setIsLoaded] = useState(false);
-  const [darkMode, setDarkMode] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [darkMode, setDarkMode] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    try {
+      const savedTheme = localStorage.getItem("mono_dark_mode");
+      return savedTheme !== null ? (JSON.parse(savedTheme) as boolean) : true;
+    } catch {
+      return true;
+    }
+  });
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    try {
+      const savedSound = localStorage.getItem("mono_sound_enabled");
+      return savedSound !== null ? (JSON.parse(savedSound) as boolean) : true;
+    } catch {
+      return true;
+    }
+  });
 
   // Cloud DB Connection Status State
   const [dbConnected, setDbConnected] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
 
   // Admin Authentication State
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [isAdmin, setIsAdmin] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      const savedAdmin = localStorage.getItem("mono_is_admin");
+      return savedAdmin !== null ? (JSON.parse(savedAdmin) as boolean) : false;
+    } catch {
+      return false;
+    }
+  });
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
   const [adminUsernameInput, setAdminUsernameInput] = useState("");
   const [adminPasswordInput, setAdminPasswordInput] = useState("");
@@ -198,7 +231,8 @@ export default function TaskDashboard() {
   const playAudioChime = useCallback(() => {
     if (!soundEnabled) return;
     try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const windowAudio = window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext };
+      const AudioCtx = windowAudio.AudioContext || windowAudio.webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
       const now = ctx.currentTime;
@@ -345,7 +379,9 @@ export default function TaskDashboard() {
               try {
                 localStorage.setItem("mono_tasks", JSON.stringify(data.tasks));
                 if (data.members) localStorage.setItem("mono_members", JSON.stringify(data.members));
-              } catch (e) {}
+              } catch {
+                // Ignore localStorage errors
+              }
 
               if (!isInitial) {
                 triggerToast("☁️ Database: Live data synced!", "info", true);
@@ -368,49 +404,22 @@ export default function TaskDashboard() {
     [cloudDbUrl, syncToCloudDB, triggerToast]
   );
 
-  // Initial Load from LocalStorage + Cloud DB
+  // Initial Load from Cloud DB
   useEffect(() => {
-    try {
-      const savedTasks = localStorage.getItem("mono_tasks");
-      const savedMembers = localStorage.getItem("mono_members");
-      const savedTheme = localStorage.getItem("mono_dark_mode");
-      const savedAdmin = localStorage.getItem("mono_is_admin");
-      const savedSound = localStorage.getItem("mono_sound_enabled");
-
-      if (savedTasks) {
-        setTasks(JSON.parse(savedTasks));
-      } else {
-        setTasks(DEFAULT_TASKS);
+    let isMounted = true;
+    const timer = setTimeout(() => {
+      if (isMounted) {
+        fetchFromCloudDB(true).finally(() => {
+          if (isMounted) {
+            setIsLoaded(true);
+          }
+        });
       }
-
-      if (savedMembers) {
-        setMembers(JSON.parse(savedMembers));
-      } else {
-        setMembers(DEFAULT_MEMBERS);
-      }
-
-      if (savedTheme !== null) {
-        setDarkMode(JSON.parse(savedTheme));
-      } else {
-        setDarkMode(true);
-      }
-
-      if (savedAdmin !== null) {
-        setIsAdmin(JSON.parse(savedAdmin));
-      }
-
-      if (savedSound !== null) {
-        setSoundEnabled(JSON.parse(savedSound));
-      }
-    } catch (e) {
-      console.error("Error reading localStorage", e);
-      setTasks(DEFAULT_TASKS);
-      setMembers(DEFAULT_MEMBERS);
-    }
-    
-    setIsLoaded(true);
-
-    fetchFromCloudDB(true);
+    }, 0);
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
   }, [fetchFromCloudDB]);
 
   // Real-time Cloud DB polling interval (every 3.5 seconds)
@@ -674,7 +683,7 @@ export default function TaskDashboard() {
 
   // Filtered & Sorted Tasks
   const filteredTasks = useMemo(() => {
-    let result = tasks.filter((task) => {
+    const result = tasks.filter((task) => {
       const assignee = members.find((m) => m.id === task.assigneeId);
       const assigneeName = assignee ? assignee.name.toLowerCase() : "";
       const matchesSearch =
