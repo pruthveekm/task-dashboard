@@ -172,8 +172,7 @@ export default function TaskDashboard() {
     (process.env.NEXT_PUBLIC_FIREBASE_DB_URL ||
     "https://task-dashboard-database-default-rtdb.firebaseio.com").trim().replace(/\/$/, "");
 
-  // Last local timestamp hash ref to prevent self-looping on Cloud DB fetch
-  const lastLocalTimestampRef = useRef<number>(0);
+  // Last state hash ref to prevent self-looping on Cloud DB fetch
   const lastStateHashRef = useRef<string>("");
 
   // Sound Synthesizer using Web Audio API
@@ -265,14 +264,14 @@ export default function TaskDashboard() {
   const syncToCloudDB = useCallback(
     async (newTasks: Task[], newMembers: TeamMember[]) => {
       setIsSyncing(true);
-      const timestamp = Date.now();
-      lastLocalTimestampRef.current = timestamp;
+      const hashKey = JSON.stringify({ tasks: newTasks, members: newMembers });
+      lastStateHashRef.current = hashKey;
+
       const statePayload = {
         tasks: newTasks,
         members: newMembers,
-        updatedAt: timestamp
+        updatedAt: Date.now()
       };
-      lastStateHashRef.current = JSON.stringify(statePayload);
 
       // Save to localStorage fallback
       try {
@@ -314,12 +313,10 @@ export default function TaskDashboard() {
           setDbConnected(true);
 
           if (data && data.tasks && Array.isArray(data.tasks)) {
-            const remoteHash = JSON.stringify({ tasks: data.tasks, members: data.members, updatedAt: data.updatedAt });
-            const remoteTimestamp = data.updatedAt || 0;
+            const remoteHash = JSON.stringify({ tasks: data.tasks, members: data.members || [] });
             
-            if (isInitial || (remoteHash !== lastStateHashRef.current && remoteTimestamp >= lastLocalTimestampRef.current)) {
+            if (isInitial || remoteHash !== lastStateHashRef.current) {
               lastStateHashRef.current = remoteHash;
-              lastLocalTimestampRef.current = remoteTimestamp || Date.now();
               setTasks(data.tasks);
               if (data.members && Array.isArray(data.members)) {
                 setMembers(data.members);
@@ -333,7 +330,7 @@ export default function TaskDashboard() {
               }
 
               if (!isInitial) {
-                triggerToast("☁️ Database: Live data synced!", "info", true);
+                triggerToast("⚡ Realtime Sync: Updated live across devices!", "info", true);
               }
             }
           } else if (isInitial) {
@@ -371,16 +368,16 @@ export default function TaskDashboard() {
     };
   }, [fetchFromCloudDB]);
 
-  // Real-time Cloud DB SSE Stream & fast polling (every 1 second)
+  // Real-time Cloud DB SSE Stream & ultra-fast polling (every 400ms)
   useEffect(() => {
     if (!isLoaded) return;
 
-    // 1. Fast polling fallback (every 1000ms)
+    // 1. Ultra-fast polling fallback (every 400ms) for instant cross-device updates
     const interval = setInterval(() => {
       fetchFromCloudDB(false);
-    }, 1000);
+    }, 400);
 
-    // 2. Realtime SSE EventSource listener for instant (<200ms) push
+    // 2. Realtime SSE EventSource listener for instant (<100ms) push
     let eventSource: EventSource | null = null;
     try {
       if (cloudDbUrl) {
@@ -392,19 +389,16 @@ export default function TaskDashboard() {
             if (syncData && syncData.tasks && Array.isArray(syncData.tasks)) {
               const remoteHash = JSON.stringify({
                 tasks: syncData.tasks,
-                members: syncData.members,
-                updatedAt: syncData.updatedAt
+                members: syncData.members || []
               });
-              const remoteTimestamp = syncData.updatedAt || 0;
 
-              if (remoteHash !== lastStateHashRef.current && remoteTimestamp >= lastLocalTimestampRef.current) {
+              if (remoteHash !== lastStateHashRef.current) {
                 lastStateHashRef.current = remoteHash;
-                lastLocalTimestampRef.current = remoteTimestamp || Date.now();
                 setTasks(syncData.tasks);
                 if (Array.isArray(syncData.members)) {
                   setMembers(syncData.members);
                 }
-                triggerToast("⚡ Instant Live Sync: Updated from Cloud DB!", "info", true);
+                triggerToast("⚡ Instant Live Sync: Updated across devices!", "info", true);
               }
             }
           } catch {
