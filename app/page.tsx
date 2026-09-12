@@ -73,58 +73,7 @@ const getTodayStr = () => {
   return `${year}-${month}-${day}`;
 };
 
-const DEFAULT_TASKS: Task[] = [
-  {
-    id: "task-101",
-    title: "Audit Neumorphic Shadow Tokens",
-    description: "Verify contrast ratios for dark & light tactile element states across display monitors.",
-    dueDate: getTodayStr(),
-    priority: "High",
-    assigneeId: "m-4",
-    status: "In Progress",
-    createdAt: new Date().toISOString()
-  },
-  {
-    id: "task-102",
-    title: "Client-Side Persistence Module",
-    description: "Sync browser localStorage for instant lag-free task state updates without backend overhead.",
-    dueDate: "2026-09-10",
-    priority: "High",
-    assigneeId: "m-1",
-    status: "Done",
-    createdAt: new Date().toISOString()
-  },
-  {
-    id: "task-103",
-    title: "Team Roster & Modal Interface",
-    description: "Build tactile modal to add, view, and assign company team members dynamically.",
-    dueDate: "2026-09-08",
-    priority: "Medium",
-    assigneeId: "m-2",
-    status: "To Do",
-    createdAt: new Date().toISOString()
-  },
-  {
-    id: "task-104",
-    title: "60fps Drag & Drop Kanban Engine",
-    description: "Implement zero-lag drag and drop column transitions with instant state updates.",
-    dueDate: "2026-09-25",
-    priority: "High",
-    assigneeId: "m-1",
-    status: "In Progress",
-    createdAt: new Date().toISOString()
-  },
-  {
-    id: "task-105",
-    title: "Global Multi-Filter & Search Bar",
-    description: "Filter tasks by title substring, priority level, or assigned team member.",
-    dueDate: "2026-09-30",
-    priority: "Low",
-    assigneeId: "m-3",
-    status: "Review",
-    createdAt: new Date().toISOString()
-  }
-];
+const DEFAULT_TASKS: Task[] = [];
 
 const STATUSES: Status[] = ["To Do", "In Progress", "Review", "Done"];
 
