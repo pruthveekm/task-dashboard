@@ -422,14 +422,56 @@ export default function TaskDashboard() {
     };
   }, [fetchFromCloudDB]);
 
-  // Real-time Cloud DB polling interval (every 3.5 seconds)
+  // Real-time Cloud DB SSE Stream & fast polling (every 1 second)
   useEffect(() => {
     if (!isLoaded) return;
+
+    // 1. Fast polling fallback (every 1000ms)
     const interval = setInterval(() => {
       fetchFromCloudDB(false);
-    }, 3500);
-    return () => clearInterval(interval);
-  }, [isLoaded, fetchFromCloudDB]);
+    }, 1000);
+
+    // 2. Realtime SSE EventSource listener for instant (<200ms) push
+    let eventSource: EventSource | null = null;
+    try {
+      if (cloudDbUrl) {
+        eventSource = new EventSource(`${cloudDbUrl}/state.json`);
+        eventSource.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            const syncData = data && data.data ? data.data : data;
+            if (syncData && syncData.tasks && Array.isArray(syncData.tasks)) {
+              const remoteHash = JSON.stringify({
+                tasks: syncData.tasks,
+                members: syncData.members,
+                updatedAt: syncData.updatedAt
+              });
+              const remoteTimestamp = syncData.updatedAt || 0;
+
+              if (remoteHash !== lastStateHashRef.current && remoteTimestamp >= lastLocalTimestampRef.current) {
+                lastStateHashRef.current = remoteHash;
+                lastLocalTimestampRef.current = remoteTimestamp || Date.now();
+                setTasks(syncData.tasks);
+                if (Array.isArray(syncData.members)) {
+                  setMembers(syncData.members);
+                }
+                triggerToast("⚡ Instant Live Sync: Updated from Cloud DB!", "info", true);
+              }
+            }
+          } catch {
+            // Ignore parse errors
+          }
+        };
+      }
+    } catch {
+      // Fallback polling handles if EventSource disconnected
+    }
+
+    return () => {
+      clearInterval(interval);
+      if (eventSource) eventSource.close();
+    };
+  }, [isLoaded, cloudDbUrl, fetchFromCloudDB, triggerToast]);
 
   // Sync to theme preference
   useEffect(() => {
@@ -502,13 +544,8 @@ export default function TaskDashboard() {
     }
   };
 
-  // Open Task Modal (Create or Edit - Admin only)
+  // Open Task Modal (Create or Edit - Available for All Users)
   const openTaskModal = (task?: Task, initialStatus?: Status) => {
-    if (!isAdmin) {
-      triggerToast("Admin login required to create or edit tasks", "error");
-      setIsAdminModalOpen(true);
-      return;
-    }
     if (task) {
       setEditingTask(task);
       setTaskTitle(task.title);
@@ -531,10 +568,9 @@ export default function TaskDashboard() {
     setIsTaskModalOpen(true);
   };
 
-  // Save Task (Create or Update - Admin only)
+  // Save Task (Create or Update - Available for All Users)
   const handleSaveTask = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAdmin) return;
     if (!taskTitle.trim()) return;
 
     const assignedMember = members.find((m) => m.id === taskAssignee);
@@ -579,12 +615,8 @@ export default function TaskDashboard() {
     setIsTaskModalOpen(false);
   };
 
-  // Delete Task (Admin only)
+  // Delete Task (Available for All Users)
   const handleDeleteTask = (id: string, title?: string) => {
-    if (!isAdmin) {
-      triggerToast("Admin permission required to delete tasks", "error");
-      return;
-    }
     if (confirm(`Are you sure you want to delete "${title || 'this task'}"?`)) {
       const updatedTasks = tasks.filter((t) => t.id !== id);
       setTasks(updatedTasks);
@@ -608,10 +640,9 @@ export default function TaskDashboard() {
     triggerToast(`☁️ Status Updated: "${targetTask.title}" → ${newStatus}`, "success", true);
   };
 
-  // Add Team Member (Admin only)
+  // Add Team Member (Available for All Users)
   const handleAddMember = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAdmin) return;
     if (!memberName.trim()) return;
 
     const parts = memberName.trim().split(" ");
@@ -636,12 +667,8 @@ export default function TaskDashboard() {
     triggerToast(`Added team member "${newMember.name}" to Cloud DB`, "success");
   };
 
-  // Delete Team Member (Admin only)
+  // Delete Team Member (Available for All Users)
   const handleDeleteMember = (id: string) => {
-    if (!isAdmin) {
-      triggerToast("Admin permission required to remove team members", "error");
-      return;
-    }
     if (members.length <= 1) {
       triggerToast("At least one team member must remain", "error");
       return;
