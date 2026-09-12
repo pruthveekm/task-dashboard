@@ -13,7 +13,6 @@ import {
   Trash2,
   Edit2,
   X,
-  RotateCcw,
   Calendar,
   Moon,
   Sun,
@@ -58,10 +57,7 @@ interface ToastMessage {
 }
 
 const DEFAULT_MEMBERS: TeamMember[] = [
-  { id: "m-1", name: "Alex Vance", role: "Lead Engineer", initials: "AV" },
-  { id: "m-2", name: "Sarah Chen", role: "Product Designer", initials: "SC" },
-  { id: "m-3", name: "Marcus Brody", role: "Ops Specialist", initials: "MB" },
-  { id: "m-4", name: "Elena Rostova", role: "Frontend Architect", initials: "ER" }
+  { id: "m-1", name: "Pruthveek Malaviya", role: "SEO", initials: "PM" }
 ];
 
 // Helper to get today's date in YYYY-MM-DD format safely
@@ -308,6 +304,14 @@ export default function TaskDashboard() {
     async (isInitial = false) => {
       try {
         const response = await fetch(`${cloudDbUrl}/state.json`, { cache: "no-store" });
+        if (response.status === 401) {
+          setDbConnected(false);
+          if (isInitial) {
+            triggerToast("⚠️ Firebase Rules Locked (401 Unauthorized)! Please set Rules to .read: true, .write: true in Firebase Console", "error", false);
+          }
+          return;
+        }
+
         if (response.ok) {
           const data = await response.json();
           setDbConnected(true);
@@ -334,7 +338,7 @@ export default function TaskDashboard() {
               }
             }
           } else if (isInitial) {
-            // Database is empty, populate initial default data into Cloud DB
+            // Database is empty, initialize Cloud DB
             syncToCloudDB(DEFAULT_TASKS, DEFAULT_MEMBERS);
             setTasks(DEFAULT_TASKS);
             setMembers(DEFAULT_MEMBERS);
@@ -368,14 +372,14 @@ export default function TaskDashboard() {
     };
   }, [fetchFromCloudDB]);
 
-  // Real-time Cloud DB SSE Stream & ultra-fast polling (every 400ms)
+  // Real-time Cloud DB SSE Stream & fast polling (every 1.5 seconds)
   useEffect(() => {
     if (!isLoaded) return;
 
-    // 1. Ultra-fast polling fallback (every 400ms) for instant cross-device updates
+    // 1. Fast polling fallback (every 1500ms) for clean network tab
     const interval = setInterval(() => {
       fetchFromCloudDB(false);
-    }, 400);
+    }, 1500);
 
     // 2. Realtime SSE EventSource listener for instant (<100ms) push
     let eventSource: EventSource | null = null;
@@ -471,20 +475,6 @@ export default function TaskDashboard() {
   const handleAdminLogout = () => {
     setIsAdmin(false);
     triggerToast("Logged out of Admin Mode", "info");
-  };
-
-  // Reset Data to defaults (Admin only)
-  const handleResetData = () => {
-    if (!isAdmin) {
-      triggerToast("Admin authorization required to reset data", "error");
-      return;
-    }
-    if (confirm("Reset all tasks and team members in Cloud DB to initial default state?")) {
-      setTasks(DEFAULT_TASKS);
-      setMembers(DEFAULT_MEMBERS);
-      syncToCloudDB(DEFAULT_TASKS, DEFAULT_MEMBERS);
-      triggerToast("Cloud Database reset to default state", "success");
-    }
   };
 
   // Open Task Modal (Create or Edit - Available for All Users)
@@ -895,18 +885,6 @@ export default function TaskDashboard() {
                   />
                 </button>
               </div>
-
-              {/* Reset Data Button (Admin only) */}
-              {isAdmin && (
-                <button
-                  onClick={handleResetData}
-                  title="Reset Cloud DB to default seed data"
-                  className="skeuo-btn p-2.5 rounded-2xl text-xs font-semibold flex items-center gap-2 cursor-pointer"
-                >
-                  <RotateCcw className="w-4 h-4" />
-                  <span className="hidden sm:inline">RESET</span>
-                </button>
-              )}
 
               {/* Team Management Modal Trigger */}
               <button
